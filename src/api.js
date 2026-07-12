@@ -1,4 +1,4 @@
-const API_BASE = '/api';
+const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
 
 let currentToken = null;
 
@@ -26,8 +26,15 @@ async function request(url, options = {}) {
       window.dispatchEvent(new Event('unauthorized'));
       throw new Error(`Unauthorized (${res.status}): Please log in again.`);
     }
-    throw new Error(text || `Request failed (${res.status})`);
-  }
+    let message = `Request failed (${res.status})`;
+    try {
+      const parsed = JSON.parse(text);
+      message = parsed.error || parsed.message || message;
+    } catch {
+      if (text) message = text;
+    }
+    throw new Error(message);
+}
 
   // Some endpoints return a plain integer (e.g. wait-time)
   const contentType = res.headers.get('content-type') || '';
@@ -71,8 +78,20 @@ export function fetchWaitTime(tokenId) {
   return request(`/tokens/${tokenId}/wait-time`);
 }
 
+export function fetchQueuePosition(tokenId) {
+  return request(`/tokens/${tokenId}/position`);
+}
+
 export function fetchMyTokens() {
   return request(`/tokens/my`);
+}
+
+export function cancelToken(tokenId) {
+  return request(`/tokens/${tokenId}/cancel`, { method: 'PUT' });
+}
+
+export function fetchDepartmentQueue(departmentId) {
+  return request(`/departments/${departmentId}/queue`);
 }
 
 /* ── Auth ── */

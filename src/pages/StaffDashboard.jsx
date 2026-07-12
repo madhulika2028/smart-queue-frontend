@@ -1,5 +1,7 @@
-import { useState, useEffect } from 'react';
-import { fetchHospitals, fetchDepartments, callNext, markComplete } from '../api';
+import { useState, useEffect, useRef } from 'react';
+import { fetchHospitals, fetchDepartments, fetchDepartmentQueue, callNext, markComplete } from '../api';
+import { ToastContainer } from '../components/Toast';
+import { useToast } from '../hooks/useToast';
 
 function StaffDashboard() {
   // ── Hospital + Department selectors ──
@@ -16,10 +18,16 @@ function StaffDashboard() {
   // ── Action state ──
   const [callingNext, setCallingNext] = useState(false);
   const [completing, setCompleting] = useState(false);
-  const [actionError, setActionError] = useState(null);
 
   // ── Currently serving token ──
   const [serving, setServing] = useState(null);
+
+  // ── Live queue list ──
+  const [queue, setQueue] = useState([]);
+  const [queueLoading, setQueueLoading] = useState(false);
+  const queueIntervalRef = useRef(null);
+
+  const { toasts, addToast, removeToast } = useToast();
 
   // Load hospitals on mount
   useEffect(() => {
@@ -46,6 +54,7 @@ function StaffDashboard() {
     setDepartments([]);
     setSelectedDeptId('');
     setServing(null);
+    setQueue([]);
     fetchDepartments(selectedHospitalId)
       .then((data) => { if (!cancelled) setDepartments(data); })
       .catch((err) => { if (!cancelled) setDeptsError(err.message || 'Failed to load departments.'); })
@@ -53,22 +62,44 @@ function StaffDashboard() {
     return () => { cancelled = true; };
   }, [selectedHospitalId]);
 
-  // Reset serving when department changes
+  // Poll the live queue when a department is selected
   useEffect(() => {
+    clearInterval(queueIntervalRef.current);
     setServing(null);
-    setActionError(null);
+    setQueue([]);
+
+    if (!selectedDeptId) return;
+
+    const pollQueue = async () => {
+      setQueueLoading(true);
+      try {
+        const data = await fetchDepartmentQueue(selectedDeptId);
+        setQueue(data);
+      } catch {
+        // silently ignore — backend may not have this endpoint yet
+      } finally {
+        setQueueLoading(false);
+      }
+    };
+
+    pollQueue();
+    queueIntervalRef.current = setInterval(pollQueue, 5000);
+    return () => clearInterval(queueIntervalRef.current);
   }, [selectedDeptId]);
 
   // ── Handlers ──
   async function handleCallNext() {
     if (!selectedDeptId) return;
     setCallingNext(true);
-    setActionError(null);
     try {
       const token = await callNext(selectedDeptId);
       setServing(token);
+      addToast(`Now serving token ${token.tokenNumber} — ${token.patientName}`, 'success');
+      // Refresh queue after calling next
+      const updated = await fetchDepartmentQueue(selectedDeptId).catch(() => []);
+      setQueue(updated);
     } catch (err) {
-      setActionError(err.message || 'Failed to call next token.');
+      addToast(err.message || 'Failed to call next token.', 'error');
     } finally {
       setCallingNext(false);
     }
@@ -77,19 +108,23 @@ function StaffDashboard() {
   async function handleComplete() {
     if (!serving) return;
     setCompleting(true);
-    setActionError(null);
     try {
       await markComplete(serving.id);
+      addToast(`Token ${serving.tokenNumber} marked as complete.`, 'info');
       setServing(null);
     } catch (err) {
-      setActionError(err.message || 'Failed to mark complete.');
+      addToast(err.message || 'Failed to mark complete.', 'error');
     } finally {
       setCompleting(false);
     }
   }
 
+  const waitingQueue = queue.filter((t) => t.status === 'WAITING');
+
   return (
     <main className="page">
+      <ToastContainer toasts={toasts} onRemove={removeToast} />
+
       <div className="page-header">
         <h1>Staff Dashboard</h1>
         <p>Manage the queue — call the next patient and mark tokens as completed.</p>
@@ -150,8 +185,20 @@ function StaffDashboard() {
               )}
             </div>
 
+            {/* Queue summary pill */}
+            {selectedDeptId && !queueLoading && (
+              <div style={{ marginBottom: '1.25rem' }}>
+                <span className="card-badge badge-blue" style={{ fontSize: '0.8rem' }}>
+                  <svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M10 9a3 3 0 100-6 3 3 0 000 6zm-7 9a7 7 0 1114 0H3z" clipRule="evenodd" />
+                  </svg>
+                  {waitingQueue.length} waiting in queue
+                </span>
+              </div>
+            )}
+
             {/* Action buttons */}
-            <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', marginTop: '0.5rem' }}>
+            <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
               <button
                 className="btn btn-primary btn-lg"
                 onClick={handleCallNext}
@@ -196,16 +243,43 @@ function StaffDashboard() {
                 </button>
               )}
             </div>
-
-            {actionError && (
-              <div className="error-box" id="staff-action-error" style={{ marginTop: '1rem' }}>
-                <svg width="18" height="18" viewBox="0 0 20 20" fill="currentColor">
-                  <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-                </svg>
-                {actionError}
-              </div>
-            )}
           </div>
+
+          {/* ── Waiting Queue List ── */}
+          {selectedDeptId && (
+            <div className="panel" style={{ marginTop: '1.5rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                <h3 style={{ fontWeight: 700, fontSize: '1rem', color: 'var(--color-gray-800)' }}>Queue</h3>
+                {queueLoading && <div className="spinner" style={{ width: 16, height: 16, borderWidth: 2 }} />}
+              </div>
+
+              {waitingQueue.length === 0 && !queueLoading && (
+                <p style={{ color: 'var(--color-gray-400)', fontSize: '0.875rem', textAlign: 'center', padding: '1rem 0' }}>
+                  No patients waiting
+                </p>
+              )}
+
+              <div className="queue-list">
+                {waitingQueue.map((token, idx) => (
+                  <div key={token.id} className="queue-item">
+                    <div className="queue-position">{idx + 1}</div>
+                    <div className="queue-token-info">
+                      <div className="queue-token-number">{token.tokenNumber}</div>
+                      <div className="queue-patient-name">{token.patientName}</div>
+                    </div>
+                    {token.emergency && (
+                      <span className="emergency-chip" style={{ fontSize: '0.65rem' }}>
+                        <svg width="10" height="10" viewBox="0 0 20 20" fill="currentColor">
+                          <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92z" clipRule="evenodd" />
+                        </svg>
+                        EMERG
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* ── Right: Now Serving ── */}
@@ -234,7 +308,7 @@ function StaffDashboard() {
               <div className="token-number">{serving.tokenNumber}</div>
               <div className="token-patient-name">{serving.patientName}</div>
               {serving.emergency && (
-                <div className="emergency-chip" style={{ marginBottom: '0.5rem' }}>
+                <div className="emergency-chip" style={{ marginBottom: '0.75rem' }}>
                   <svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor">
                     <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
                   </svg>
